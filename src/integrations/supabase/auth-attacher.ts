@@ -35,15 +35,23 @@ function readCachedAccessToken(): string | null {
 // the browser never attaches the bearer token to serverFn RPCs.
 export const attachSupabaseAuth = createMiddleware({ type: 'function' }).client(
   async ({ next }) => {
+    // Read the cached token synchronously from localStorage first.
+    // Supabase's getSession() can resolve with `null` on the very first
+    // call after a navigation/hard refresh because the in-memory session
+    // hasn't been rehydrated from storage yet. If we trusted that null,
+    // protected server fns would 401 on first navigation and only succeed
+    // after a manual refresh. The cached token is the source of truth
+    // until getSession resolves with a real session.
     const cachedToken = readCachedAccessToken()
-    const token = await withTimeout(
+    const liveToken = await withTimeout(
       supabase.auth.getSession().then(({ data }) => data.session?.access_token ?? null),
       SESSION_LOOKUP_TIMEOUT_MS,
       'Server function auth token lookup timed out',
     ).catch((error) => {
       console.warn('[server-fn-auth] token lookup failed; using cached token if available', error)
-      return cachedToken
+      return null
     })
+    const token = liveToken ?? cachedToken
     return next({
       headers: token ? { Authorization: `Bearer ${token}` } : {},
     })
