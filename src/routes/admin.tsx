@@ -1,10 +1,10 @@
 import {
   createFileRoute,
   Outlet,
-  redirect,
   useNavigate,
   useLocation,
 } from "@tanstack/react-router";
+
 import { useEffect, useState } from "react";
 import { AdminSidebar } from "@/components/admin/AdminSidebar";
 import { useAppStore, hasLocalAuthSession } from "@/stores/app-store";
