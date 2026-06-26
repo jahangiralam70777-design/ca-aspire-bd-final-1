@@ -76,62 +76,82 @@ export async function syncModuleHiddenFlag(
 }
 
 export const listModuleVisibility = createServerFn({ method: "GET" }).handler(async () => {
-  // Public read using the anon/publishable client so this works without a service role key.
-  const { supabase } = await import("@/integrations/supabase/client");
-  const [{ data, error }, flash, notes, qbank, classes] = await Promise.all([
-    supabase
-      .from("module_visibility")
-      .select("key,label,hidden,updated_at")
-      .order("label"),
-    supabase
-      .from("flash_card_visibility")
-      .select("section_hidden,updated_at")
-      .eq("id", 1)
-      .maybeSingle(),
-    supabase
-      .from("short_notes_visibility")
-      .select("section_hidden,updated_at")
-      .eq("id", 1)
-      .maybeSingle(),
-    supabase
-      .from("question_bank_visibility")
-      .select("section_hidden,updated_at")
-      .eq("id", 1)
-      .maybeSingle(),
-    supabase
-      .from("video_class_visibility")
-      .select("section_hidden,updated_at")
-      .eq("id", 1)
-      .maybeSingle(),
-  ]);
-  if (error) throw error;
-  const sectionHidden: Partial<Record<ModuleKey, { hidden: boolean; updated_at?: string }>> = {
-    flash_cards: {
-      hidden: !!flash.data?.section_hidden,
-      updated_at: flash.data?.updated_at,
-    },
-    short_notes: {
-      hidden: !!notes.data?.section_hidden,
-      updated_at: notes.data?.updated_at,
-    },
-    qns_bank: {
-      hidden: !!qbank.data?.section_hidden,
-      updated_at: qbank.data?.updated_at,
-    },
-    classes: {
-      hidden: !!classes.data?.section_hidden,
-      updated_at: classes.data?.updated_at,
-    },
-  };
-  return ((data ?? []) as ModuleVisibilityRow[]).map((row) => {
-    const manager = sectionHidden[row.key];
-    if (!manager?.hidden) return row;
-    return {
-      ...row,
-      hidden: true,
-      updated_at: manager.updated_at ?? row.updated_at,
+  // Public read. Use a server-side publishable client (NOT the browser client,
+  // which touches localStorage and is unsafe on the Worker). Any failure here
+  // (rejected key, network blip, missing table) must NOT bubble into the React
+  // tree — sibling public reads use the same graceful-fallback pattern. A
+  // throw here previously surfaced as the global "Something went wrong" page
+  // on every route that reads module visibility.
+  try {
+    const { createClient } = await import("@supabase/supabase-js");
+    const url = process.env.SUPABASE_URL;
+    const key = process.env.SUPABASE_PUBLISHABLE_KEY;
+    if (!url || !key) {
+      console.warn("listModuleVisibility: missing SUPABASE_URL/PUBLISHABLE_KEY; returning []");
+      return [] as ModuleVisibilityRow[];
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const supabase = createClient<any>(url, key, {
+      auth: { storage: undefined, persistSession: false, autoRefreshToken: false },
+    });
+    const [{ data, error }, flash, notes, qbank, classes] = await Promise.all([
+      supabase
+        .from("module_visibility")
+        .select("key,label,hidden,updated_at")
+        .order("label"),
+      supabase
+        .from("flash_card_visibility")
+        .select("section_hidden,updated_at")
+        .eq("id", 1)
+        .maybeSingle(),
+      supabase
+        .from("short_notes_visibility")
+        .select("section_hidden,updated_at")
+        .eq("id", 1)
+        .maybeSingle(),
+      supabase
+        .from("question_bank_visibility")
+        .select("section_hidden,updated_at")
+        .eq("id", 1)
+        .maybeSingle(),
+      supabase
+        .from("video_class_visibility")
+        .select("section_hidden,updated_at")
+        .eq("id", 1)
+        .maybeSingle(),
+    ]);
+    if (error) throw error;
+    const sectionHidden: Partial<Record<ModuleKey, { hidden: boolean; updated_at?: string }>> = {
+      flash_cards: {
+        hidden: !!flash.data?.section_hidden,
+        updated_at: flash.data?.updated_at,
+      },
+      short_notes: {
+        hidden: !!notes.data?.section_hidden,
+        updated_at: notes.data?.updated_at,
+      },
+      qns_bank: {
+        hidden: !!qbank.data?.section_hidden,
+        updated_at: qbank.data?.updated_at,
+      },
+      classes: {
+        hidden: !!classes.data?.section_hidden,
+        updated_at: classes.data?.updated_at,
+      },
     };
-  });
+    return ((data ?? []) as ModuleVisibilityRow[]).map((row) => {
+      const manager = sectionHidden[row.key];
+      if (!manager?.hidden) return row;
+      return {
+        ...row,
+        hidden: true,
+        updated_at: manager.updated_at ?? row.updated_at,
+      };
+    });
+  } catch (e) {
+    console.warn("listModuleVisibility failed; returning empty list:", e);
+    return [] as ModuleVisibilityRow[];
+  }
 });
 
 const setInput = z.object({
