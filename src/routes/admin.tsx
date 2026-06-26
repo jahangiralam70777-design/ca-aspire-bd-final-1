@@ -20,17 +20,10 @@ import { withTimeout } from "@/lib/async-timeout";
 
 export const Route = createFileRoute("/admin")({
   // Admin session lives in localStorage (Supabase). SSR-skip + a
-  // synchronous beforeLoad gate prevents admin chrome from being
-  // streamed to anonymous visitors. Server-verified role check still
-  // runs inside <AdminGate /> against `user_roles`.
+  // component-level gate (post-mount) prevents admin chrome from being
+  // shown to anonymous visitors AND avoids a hydration mismatch from
+  // synchronously redirecting during hydration.
   ssr: false,
-  beforeLoad: ({ location }) => {
-    if (typeof window === "undefined") return;
-    if (location.pathname === "/admin/login") return; // public sub-route
-    if (!hasLocalAuthSession()) {
-      throw redirect({ to: "/admin/login" });
-    }
-  },
   component: AdminLayout,
   head: () => ({
     meta: [
@@ -44,6 +37,7 @@ export const Route = createFileRoute("/admin")({
     ],
   }),
 });
+
 
 const ADMIN_VERIFIED_KEY = "admin-verified-at";
 const ADMIN_VERIFIED_TTL_MS = 60_000;
