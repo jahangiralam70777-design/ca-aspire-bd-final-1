@@ -991,6 +991,20 @@ export function CustomExamFlow() {
                 </div>
 
                 <div className="mt-6 flex flex-col gap-3 sm:flex-row">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (typeof window !== "undefined" && window.history.length > 1) {
+                        window.history.back();
+                      } else if (typeof window !== "undefined") {
+                        window.location.assign("/dashboard");
+                      }
+                    }}
+                    className="glass inline-flex flex-1 items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold transition-transform hover:scale-[1.02]"
+                    aria-label="Go back"
+                  >
+                    <ArrowLeft className="h-4 w-4" /> Back
+                  </button>
                   <button className="glass inline-flex flex-1 items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold transition-transform hover:scale-[1.02]">
                     <Download className="h-4 w-4" /> Download Result
                   </button>
@@ -1008,6 +1022,7 @@ export function CustomExamFlow() {
                     <RotateCw className="h-4 w-4" /> Retry Exam
                   </button>
                 </div>
+
               </div>
             </div>
           </div>

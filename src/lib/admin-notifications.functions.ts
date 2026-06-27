@@ -226,13 +226,18 @@ export const listMyNotifications = createServerFn({ method: "GET" })
   .middleware([requireSupabaseAuth])
   .inputValidator(noInput)
   .handler(async ({ context }) => {
-    const sb = context.supabase;
+    // Use the admin client to bypass any legacy RLS policy that gates
+    // notification SELECT on status='sent' — admin broadcasts are written
+    // with status='unread' and would otherwise be invisible to the
+    // recipient. Auth still enforced by the strict user_id filter.
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const sb = supabaseAdmin as unknown as typeof context.supabase;
     const { data, error } = await sb
       .from("notifications")
       .select("id,title,body,link,type,priority,status,sent_at,created_at")
       .eq("user_id", context.userId)
       .in("status", ["unread", "read", "sent"])
-      .order("sent_at", { ascending: false })
+      .order("sent_at", { ascending: false, nullsFirst: false })
       .limit(100);
     if (error) throw error;
     const { data: reads } = await sb
@@ -247,6 +252,7 @@ export const listMyNotifications = createServerFn({ method: "GET" })
       read: n.status === "read" || readSet.has(n.id),
     }));
   });
+
 
 export const markNotificationRead = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
