@@ -527,16 +527,21 @@ export const listMyBroadcasts = createServerFn({ method: "GET" })
   .middleware([requireSupabaseAuth])
   .inputValidator(noInput)
   .handler(async ({ context }) => {
-    const { data, error } = await asAny(context.supabase)
+    // Use the admin client so a stale/legacy RLS policy on `broadcasts`
+    // can't strip the embedded join and silently empty the student inbox.
+    // Authorization is still enforced: we filter strictly by the
+    // authenticated user's id from the verified bearer token.
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { data, error } = await asAny(supabaseAdmin)
       .from("broadcast_recipients")
-      .select("id, broadcast_id, read_at, hidden_at, broadcasts(*)")
+      .select("id, broadcast_id, read_at, hidden_at, delivered_at, broadcasts(*)")
       .eq("user_id", context.userId)
       .is("hidden_at", null)
       .order("delivered_at", { ascending: false })
       .limit(100);
     if (error) throw new Error(error.message);
     return ((data ?? []) as any[])
-      .filter((r) => r.broadcasts?.visible)
+      .filter((r) => r.broadcasts && r.broadcasts.visible !== false)
       .map((r) => ({
         ...(r.broadcasts as Broadcast),
         recipient_id: r.id,
@@ -544,6 +549,7 @@ export const listMyBroadcasts = createServerFn({ method: "GET" })
         hidden_at: r.hidden_at,
       })) as MyBroadcast[];
   });
+
 
 export const markBroadcastRead = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
