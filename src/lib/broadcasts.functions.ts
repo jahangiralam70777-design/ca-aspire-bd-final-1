@@ -245,97 +245,80 @@ export const createBroadcast = createServerFn({ method: "POST" })
         if (e2) throw new Error(`Broadcast recipient delivery failed: ${e2.message}`);
       }
 
-      const wantsInbox = data.delivery_methods.includes("inbox") || data.delivery_methods.includes("popup");
-      if (wantsInbox) {
-        const notificationRows = ids.map((uid) => ({
-          user_id: uid,
-          source_broadcast_id: row.id,
-          delivery_group_id: row.id,
-          title: `FROM ADMIN: ${data.subject.trim()}`,
-          body: data.body.trim(),
-          message: data.body.trim(),
-          type: "broadcast",
-          priority: notificationPriority(data.priority),
-          audience: "users",
-          status: "unread",
-          sent_at: now,
-          delivered_at: now,
-          recipients_count: 1,
-          delivered_count: 1,
-          created_by: context.userId,
-        }));
-        for (const chunk of chunks(notificationRows)) {
-          await upsertChunkWithRetry(
-            supabaseAdmin,
-            "notifications",
-            chunk,
-            "source_broadcast_id,user_id",
-            "Per-user notification fan-out",
-          );
+      // Delivery destination: the existing Student Live Chat.
+      // Broadcasts always land in each recipient's current live chat
+      // conversation as a `system` message — no separate inbox, no separate
+      // "Admin Broadcasts" thread. The legacy inbox/notifications fan-out
+      // is intentionally skipped so the message appears in exactly one
+      // place (the live chat widget).
+      const messageBody = `📢 FROM ADMIN\n${data.subject.trim()}\n\n${data.body.trim()}`;
+      for (const uidChunk of chunks(ids, 200)) {
+        // 1. Find each user's latest non-closed conversation.
+        const { data: existing, error: exErr } = await asAny(supabaseAdmin)
+          .from("live_chat_conversations")
+          .select("id,user_id,last_message_at,status")
+          .in("user_id", uidChunk)
+          .not("status", "eq", "closed")
+          .order("last_message_at", { ascending: false });
+        if (exErr) throw new Error(`Chat lookup failed: ${exErr.message}`);
+        const byUser = new Map<string, string>();
+        for (const c of (existing ?? []) as Array<{ id: string; user_id: string }>) {
+          if (!byUser.has(c.user_id)) byUser.set(c.user_id, c.id);
         }
-        const delivered = await countBroadcastNotifications(supabaseAdmin, row.id, ids);
-        if (delivered !== ids.length) {
-          throw new Error(`Notification delivery incomplete: ${delivered}/${ids.length} recipients confirmed`);
+
+        // 2. Create a default conversation for users who don't have one yet.
+        const missing = uidChunk.filter((u) => !byUser.has(u));
+        if (missing.length > 0) {
+          const { data: created, error: cErr } = await asAny(supabaseAdmin)
+            .from("live_chat_conversations")
+            .insert(missing.map((uid) => ({
+              user_id: uid,
+              status: "new",
+              last_message_at: now,
+            })))
+            .select("id,user_id");
+          if (cErr) throw new Error(`Chat delivery failed: ${cErr.message}`);
+          for (const c of (created ?? []) as Array<{ id: string; user_id: string }>) {
+            byUser.set(c.user_id, c.id);
+          }
+        }
+
+        const conversationIds = Array.from(new Set(Array.from(byUser.values())));
+        if (conversationIds.length === 0) continue;
+
+        // 3. Dedupe — skip conversations that already received this exact
+        // broadcast body (guards against accidental double-send).
+        const { data: dupes } = await asAny(supabaseAdmin)
+          .from("live_chat_messages")
+          .select("conversation_id")
+          .in("conversation_id", conversationIds)
+          .eq("sender_type", "system")
+          .eq("body", messageBody);
+        const alreadyDelivered = new Set<string>(
+          ((dupes ?? []) as Array<{ conversation_id: string }>).map((r) => r.conversation_id),
+        );
+
+        const messages = conversationIds
+          .filter((cid) => !alreadyDelivered.has(cid))
+          .map((cid) => ({
+            conversation_id: cid,
+            sender_type: "system",
+            sender_user_id: context.userId,
+            body: messageBody,
+            delivered_at: now,
+          }));
+
+        // 4. Insert system message. The `trg_lcm_rollup` trigger updates
+        // conversation status, last_message_at, and unread_for_user — do
+        // not also update the conversation row manually (would double-count).
+        if (messages.length) {
+          const { error: mErr } = await asAny(supabaseAdmin)
+            .from("live_chat_messages")
+            .insert(messages);
+          if (mErr) throw new Error(`Chat message delivery failed: ${mErr.message}`);
         }
       }
 
-      if (data.delivery_methods.includes("chat")) {
-        const BROADCAST_SUBJECT = "Admin Broadcasts";
-        for (const uidChunk of chunks(ids, 200)) {
-          // Find existing broadcast conversations for these users
-          const { data: existing, error: exErr } = await asAny(supabaseAdmin)
-            .from("live_chat_conversations")
-            .select("id,user_id")
-            .in("user_id", uidChunk)
-            .eq("subject", BROADCAST_SUBJECT);
-          if (exErr) throw new Error(`Chat lookup failed: ${exErr.message}`);
-          const byUser = new Map<string, string>(
-            ((existing ?? []) as Array<{ id: string; user_id: string }>).map((c) => [c.user_id, c.id]),
-          );
-          const missing = uidChunk.filter((u) => !byUser.has(u));
-          if (missing.length > 0) {
-            const { data: created, error: cErr } = await asAny(supabaseAdmin)
-              .from("live_chat_conversations")
-              .insert(missing.map((uid) => ({
-                user_id: uid,
-                subject: BROADCAST_SUBJECT,
-                status: "open",
-                last_message_preview: data.subject.trim(),
-                last_message_at: now,
-              })))
-              .select("id,user_id");
-            if (cErr) throw new Error(`Chat delivery failed: ${cErr.message}`);
-            for (const c of (created ?? []) as Array<{ id: string; user_id: string }>) {
-              byUser.set(c.user_id, c.id);
-            }
-          }
-          const messages = uidChunk
-            .map((uid) => byUser.get(uid))
-            .filter((cid): cid is string => !!cid)
-            .map((cid) => ({
-              conversation_id: cid,
-              sender_type: "system",
-              sender_user_id: context.userId,
-              body: `📢 FROM ADMIN\n${data.subject.trim()}\n\n${data.body.trim()}`,
-              delivered_at: now,
-            }));
-          if (messages.length) {
-            const { error: mErr } = await asAny(supabaseAdmin).from("live_chat_messages").insert(messages);
-            if (mErr) throw new Error(`Chat message delivery failed: ${mErr.message}`);
-            // Bump conversation unread + last message
-            for (const cid of new Set(messages.map((m) => m.conversation_id))) {
-              await asAny(supabaseAdmin)
-                .from("live_chat_conversations")
-                .update({
-                  last_message_at: now,
-                  last_message_preview: data.subject.trim(),
-                  unread_for_user: 1,
-                })
-                .eq("id", cid);
-            }
-          }
-        }
-      }
     }
 
     return { id: row.id, recipient_count: ids.length };
