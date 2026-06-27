@@ -5,25 +5,36 @@ import { withTimeout } from '@/lib/async-timeout'
 
 const SESSION_LOOKUP_TIMEOUT_MS = 2_500
 
-function findAccessToken(value: unknown): string | null {
+function findSession(value: unknown): { access_token: string; expires_at?: number } | null {
   if (!value || typeof value !== 'object') return null
   const record = value as Record<string, unknown>
-  if (typeof record.access_token === 'string') return record.access_token
-  if (record.currentSession) return findAccessToken(record.currentSession)
-  if (record.session) return findAccessToken(record.session)
+  if (typeof record.access_token === 'string') {
+    return {
+      access_token: record.access_token,
+      expires_at: typeof record.expires_at === 'number' ? record.expires_at : undefined,
+    }
+  }
+  if (record.currentSession) return findSession(record.currentSession)
+  if (record.session) return findSession(record.session)
   return null
 }
 
 function readCachedAccessToken(): string | null {
   if (typeof window === 'undefined') return null
   try {
+    const nowSec = Math.floor(Date.now() / 1000)
     for (let i = 0; i < window.localStorage.length; i += 1) {
       const key = window.localStorage.key(i)
       if (!key || !key.startsWith('sb-') || !key.endsWith('-auth-token')) continue
       const raw = window.localStorage.getItem(key)
       if (!raw) continue
-      const token = findAccessToken(JSON.parse(raw))
-      if (token) return token
+      const session = findSession(JSON.parse(raw))
+      if (!session) continue
+      // Skip expired tokens — attaching an expired bearer is worse than
+      // attaching none (the server rejects, and we miss the chance to let
+      // supabase-js auto-refresh on the next getSession() tick).
+      if (session.expires_at && session.expires_at <= nowSec) continue
+      return session.access_token
     }
   } catch {
     return null
